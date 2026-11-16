@@ -83,6 +83,13 @@ class PublisherGuardTests(unittest.TestCase):
         self.assertIn("Release metadata does not match", result.stderr)
         self.assertNotIn("docker", calls)
 
+    def test_valid_preflight_reaches_image_verification(self):
+        # Positive control: no missing candidate can mask a failed refusal guard.
+        result, calls = self.run_publisher()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Synthetic Docker stop", result.stderr)
+        self.assertEqual(calls, "docker")
+
     def run_publisher(self, tags="", lookup_error="", mismatched_candidate=False):
         with tempfile.TemporaryDirectory(prefix="guarded-publisher-test-") as work:
             root = Path(work)
@@ -110,21 +117,21 @@ print(os.environ['RELEASE_TAGS'])
 import os
 from pathlib import Path
 Path(os.environ['COMMAND_LOG']).write_text('docker')
-raise SystemExit('Docker must not run on a refused publication')
+raise SystemExit('Synthetic Docker stop before image loading or publication')
 """,
             }.items():
                 stub = root / "stubs" / name
                 stub.write_text(source)
                 stub.chmod(0o755)
-            if mismatched_candidate:
-                out = root / "dist/release"
-                out.mkdir(parents=True)
-                (out / "release.json").write_text(json.dumps({
-                    "tag": "v0.1.0", "revision": REVISION, "version": "0.2.0",
-                    "repository": "madhifallah/guarded-batch-operator",
-                    "platform": "linux/amd64", "image": IMAGE,
-                }))
-                checksums(out)
+            out = root / "dist/release"
+            out.mkdir(parents=True)
+            (out / "release.json").write_text(json.dumps({
+                "tag": "v0.1.0", "revision": REVISION,
+                "version": "0.2.0" if mismatched_candidate else "0.1.0",
+                "repository": "madhifallah/guarded-batch-operator",
+                "platform": "linux/amd64", "image": IMAGE,
+            }))
+            checksums(out)
             log = root / "commands.log"
             result = subprocess.run(["bash", str(root / "scripts/publish-release.sh")],
                                     env={**os.environ, "PATH": str(root / "stubs") + ":" + os.environ["PATH"],
