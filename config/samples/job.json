@@ -1,0 +1,18 @@
+{
+  "activeDeadlineSeconds": 120,
+  "backoffLimit": 0,
+  "template": {
+    "spec": {
+      "restartPolicy": "Never",
+      "automountServiceAccountToken": false,
+      "securityContext": {"runAsNonRoot": true, "runAsUser": 65532, "seccompProfile": {"type": "RuntimeDefault"}},
+      "containers": [{
+        "name": "maintenance",
+        "image": "busybox:1.37.0",
+        "command": ["sh", "-c", "echo 'Synthetic maintenance completed'; sleep 5"],
+        "resources": {"requests": {"cpu": "10m", "memory": "8Mi"}, "limits": {"cpu": "100m", "memory": "32Mi"}},
+        "securityContext": {"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": {"drop": ["ALL"]}}
+      }]
+    }
+  }
+}

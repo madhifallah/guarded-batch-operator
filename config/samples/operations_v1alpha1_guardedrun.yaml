@@ -1,0 +1,9 @@
+apiVersion: operations.example.org/v1alpha1
+kind: GuardedRun
+metadata:
+  name: maintenance-preview
+spec:
+  templateRef: maintenance-template
+  policyRef: maintenance-policy
+  evidenceRef: backup-evidence
+  mode: EvaluateOnly
