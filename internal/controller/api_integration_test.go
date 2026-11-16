@@ -73,11 +73,28 @@ func TestAPISchemaAndReconciliation(t *testing.T) {
 	if err := api.Create(ctx, invalid); !apierrors.IsInvalid(err) {
 		t.Fatalf("invalid mode accepted: %v", err)
 	}
+	// The real status subresource must reject a decision based on an old resource version.
+	original := run.DeepCopy()
+	run.Status.JobName, run.Status.JobUID = "recorded-job", "recorded-uid"
+	if err := api.Status().Update(ctx, &run); err != nil {
+		t.Fatal(err)
+	}
+	direct := &GuardedRunReconciler{Client: api}
+	if _, err := direct.report(ctx, original.DeepCopy(), original, "Blocked", "PolicyDenied", "Stale decision", false); !apierrors.IsConflict(err) {
+		t.Fatalf("stale API status patch accepted: %v", err)
+	}
+	if err := api.Get(ctx, key, &run); err != nil || run.Status.JobUID != "recorded-uid" {
+		t.Fatalf("recorded execution identity lost: status=%+v error=%v", run.Status, err)
+	}
+	run.Status = operations.GuardedRunStatus{}
+	if err := api.Status().Update(ctx, &run); err != nil {
+		t.Fatal(err)
+	}
 	manager, err := ctrl.NewManager(cfg, ctrl.Options{Scheme: seeded.Scheme, Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0", Cache: cache.Options{DefaultNamespaces: map[string]cache.Config{key.Namespace: {}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	reconciler := &GuardedRunReconciler{Client: manager.GetClient(), Scheme: seeded.Scheme, Policy: seeded.Policy, Now: seeded.Now}
+	reconciler := &GuardedRunReconciler{Client: manager.GetClient(), APIReader: manager.GetAPIReader(), Scheme: seeded.Scheme, Policy: seeded.Policy, Now: seeded.Now}
 	if err := reconciler.SetupWithManager(manager); err != nil {
 		t.Fatal(err)
 	}

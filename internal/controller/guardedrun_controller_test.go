@@ -2,7 +2,9 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -11,13 +13,16 @@ import (
 	"github.com/madhifallah/guarded-batch-operator/internal/policy"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 var testNow = time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
@@ -186,6 +191,17 @@ func TestTemplateBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Run("explicit native controller", func(t *testing.T) {
+		var spec batchv1.JobSpec
+		if err := json.Unmarshal(raw, &spec); err != nil {
+			t.Fatal(err)
+		}
+		suspended, manager := false, batchv1.JobControllerName
+		spec.Suspend, spec.ManagedBy = &suspended, &manager
+		if err := validateTemplate(spec); err != nil {
+			t.Fatalf("valid native template rejected: %v", err)
+		}
+	})
 	for _, tc := range []struct {
 		name string
 		edit func(*batchv1.JobSpec)
@@ -196,6 +212,8 @@ func TestTemplateBounds(t *testing.T) {
 		{"ttl", func(s *batchv1.JobSpec) { v := int32(1); s.TTLSecondsAfterFinished = &v }},
 		{"no resources", func(s *batchv1.JobSpec) { s.Template.Spec.Containers[0].Resources = corev1.ResourceRequirements{} }},
 		{"restart", func(s *batchv1.JobSpec) { s.Template.Spec.RestartPolicy = corev1.RestartPolicyOnFailure }},
+		{"suspended", func(s *batchv1.JobSpec) { v := true; s.Suspend = &v }},
+		{"external controller", func(s *batchv1.JobSpec) { v := "example.org/external"; s.ManagedBy = &v }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var spec batchv1.JobSpec
@@ -205,5 +223,190 @@ func TestTemplateBounds(t *testing.T) {
 				t.Fatal("invalid template accepted")
 			}
 		})
+	}
+}
+
+func TestLaggingJobCacheDoesNotFailExistingExecution(t *testing.T) {
+	r, key := fixture(t, "Execute")
+	first := reconcileRun(t, r, key)
+	authority := r.Client
+	r.APIReader = authority
+	r.Client = interceptor.NewClient(authority.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*batchv1.Job); ok {
+				return apierrors.NewNotFound(schema.GroupResource{Group: "batch", Resource: "jobs"}, key.Name)
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	run := reconcileRun(t, r, key)
+	if run.Status.Phase != "Running" || run.Status.JobName != first.Status.JobName {
+		t.Fatalf("cache lag changed execution: %+v", run.Status)
+	}
+}
+
+func TestLaggingRunCacheCannotRelaunchObservedExecution(t *testing.T) {
+	r, key := fixture(t, "Execute")
+	var stale operations.GuardedRun
+	if err := r.Get(t.Context(), key, &stale); err != nil {
+		t.Fatal(err)
+	}
+	first := reconcileRun(t, r, key)
+	if err := r.Delete(t.Context(), &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: first.Status.JobName, Namespace: key.Namespace}}); err != nil {
+		t.Fatal(err)
+	}
+	authority := r.Client
+	r.APIReader = authority
+	r.Client = interceptor.NewClient(authority.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if target, ok := obj.(*operations.GuardedRun); ok {
+				stale.DeepCopyInto(target)
+				return nil
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	for range 2 {
+		if _, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: key}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var actual operations.GuardedRun
+	if err := authority.Get(t.Context(), key, &actual); err != nil {
+		t.Fatal(err)
+	}
+	var jobs batchv1.JobList
+	if err := authority.List(t.Context(), &jobs); err != nil {
+		t.Fatal(err)
+	}
+	if actual.Status.Phase != "Failed" || actual.Status.Conditions[0].Reason != "JobMissing" || len(jobs.Items) != 0 {
+		t.Fatalf("observed execution relaunched: status=%+v jobs=%d", actual.Status, len(jobs.Items))
+	}
+}
+
+func TestStatusConflictCannotOverwriteExecutionIdentity(t *testing.T) {
+	r, key := fixture(t, "Execute")
+	var original operations.GuardedRun
+	if err := r.Get(t.Context(), key, &original); err != nil {
+		t.Fatal(err)
+	}
+	current := original.DeepCopy()
+	current.Status.JobName, current.Status.JobUID = "observed-job", "observed-uid"
+	if err := r.Status().Update(t.Context(), current); err != nil {
+		t.Fatal(err)
+	}
+	_, err := r.report(t.Context(), original.DeepCopy(), &original, "Blocked", "PolicyDenied", "Prerequisites denied", false)
+	if !apierrors.IsConflict(err) {
+		t.Fatalf("expected stale decision conflict, got %v", err)
+	}
+	if err := r.Get(t.Context(), key, current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.JobUID != "observed-uid" {
+		t.Fatal("stale status erased recorded execution")
+	}
+}
+
+func TestStatusWriteFailureRecoversExistingJob(t *testing.T) {
+	r, key := fixture(t, "Execute")
+	authority := r.Client
+	creates := 0
+	r.APIReader = authority
+	r.Client = interceptor.NewClient(authority.(client.WithWatch), interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, ok := obj.(*batchv1.Job); ok {
+				creates++
+				obj.SetUID("created-job")
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+		SubResourcePatch: func(context.Context, client.Client, string, client.Object, client.Patch, ...client.SubResourcePatchOption) error {
+			return errors.New("synthetic status-write failure")
+		},
+	})
+	if _, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: key}); err == nil {
+		t.Fatal("status-write failure was hidden")
+	}
+	r.Client = authority
+	run := reconcileRun(t, r, key)
+	if creates != 1 || run.Status.Phase != "Running" || run.Status.JobUID != "created-job" {
+		t.Fatalf("failed status write did not recover: creates=%d status=%+v", creates, run.Status)
+	}
+}
+
+func TestReplacedJobIsNotAdopted(t *testing.T) {
+	for _, ownership := range []string{"same owner", "foreign"} {
+		t.Run(ownership, func(t *testing.T) {
+			r, key := fixture(t, "Execute")
+			first := reconcileRun(t, r, key)
+			var job batchv1.Job
+			jobKey := client.ObjectKey{Namespace: key.Namespace, Name: first.Status.JobName}
+			if err := r.Get(t.Context(), jobKey, &job); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Delete(t.Context(), &job); err != nil {
+				t.Fatal(err)
+			}
+			// Simulate distinct API-assigned identities, with the same owner reference.
+			var run operations.GuardedRun
+			if err := r.Get(t.Context(), key, &run); err != nil {
+				t.Fatal(err)
+			}
+			run.Status.JobUID = "original-job"
+			if err := r.Status().Update(t.Context(), &run); err != nil {
+				t.Fatal(err)
+			}
+			if ownership == "foreign" {
+				job.OwnerReferences = nil
+			}
+			job.ResourceVersion, job.UID = "", "replacement-job"
+			if err := r.Create(t.Context(), &job); err != nil {
+				t.Fatal(err)
+			}
+			run = reconcileRun(t, r, key)
+			if run.Status.Phase != "Failed" || run.Status.Conditions[0].Reason != "JobReplaced" || run.Status.JobUID != "original-job" {
+				t.Fatalf("replacement adopted: %+v", run.Status)
+			}
+		})
+	}
+}
+
+func TestJSONInputsRejectTrailingData(t *testing.T) {
+	for _, ref := range []string{"template", "evidence"} {
+		for _, suffix := range []string{" {}", " garbage"} {
+			t.Run(ref+suffix, func(t *testing.T) {
+				r, key := fixture(t, "Execute")
+				var cm corev1.ConfigMap
+				if err := r.Get(t.Context(), client.ObjectKey{Namespace: key.Namespace, Name: ref}, &cm); err != nil {
+					t.Fatal(err)
+				}
+				file := "job.json"
+				if ref == "evidence" {
+					file = "evidence.json"
+				}
+				setConfig(t, r, ref, file, cm.Data[file]+suffix)
+				run := reconcileRun(t, r, key)
+				var jobs batchv1.JobList
+				if err := r.List(t.Context(), &jobs); err != nil {
+					t.Fatal(err)
+				}
+				if run.Status.Phase != "Blocked" || len(jobs.Items) != 0 {
+					t.Fatalf("trailing JSON executed: %+v", run.Status)
+				}
+			})
+		}
+	}
+}
+
+func TestEvidenceIntegersRetainPolicyPrecision(t *testing.T) {
+	r, key := fixture(t, "Execute")
+	setConfig(t, r, "evidence", "evidence.json", `{"revision":9007199254740993}`)
+	setConfig(t, r, "policy", "policy.rego", "package guarded\nallow := input.facts.revision == 9007199254740992")
+	if run := reconcileRun(t, r, key); run.Status.Phase != "Blocked" {
+		t.Fatalf("rounded evidence authorized: %+v", run.Status)
+	}
+	setConfig(t, r, "policy", "policy.rego", "package guarded\nallow := input.facts.revision == 9007199254740993")
+	if run := reconcileRun(t, r, key); run.Status.Phase != "Running" {
+		t.Fatalf("exact evidence value lost: %+v", run.Status)
 	}
 }

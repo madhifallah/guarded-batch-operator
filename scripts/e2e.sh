@@ -35,6 +35,18 @@ else
 fi
 kubectl wait --for=condition=Established crd/guardedruns.operations.example.org --timeout=60s
 kubectl -n "$namespace" rollout status deployment/guarded-batch-operator-controller-manager --timeout=180s
+runtime_identity="system:serviceaccount:$namespace:guarded-batch-operator-controller-manager"
+kubectl auth can-i get configmaps --namespace="$namespace" --as="$runtime_identity"
+for verb in create update patch delete; do
+  if kubectl auth can-i "$verb" configmaps --namespace="$namespace" --as="$runtime_identity"; then
+    echo "Runtime unexpectedly permits $verb on trusted ConfigMaps" >&2
+    exit 1
+  fi
+done
+if kubectl auth can-i get secrets --namespace="$namespace" --as="$runtime_identity"; then
+  echo 'Runtime unexpectedly permits Secret reads' >&2
+  exit 1
+fi
 kubectl -n "$namespace" create configmap maintenance-template --from-file=job.json=config/samples/job.json
 kubectl -n "$namespace" create configmap maintenance-policy --from-file=policy.rego=policies/maintenance.rego
 printf '{"backup":{"succeeded":true,"completedAt":"2000-01-01T00:00:00Z"},"maintenanceFreeze":false}' > "$workdir/evidence.json"
@@ -81,4 +93,7 @@ PY
 kubectl -n "$namespace" create configmap failing-template --from-file="job.json=$workdir/failing-job.json"
 submit failure Execute failing-template
 kubectl -n "$namespace" wait --for=jsonpath='{.status.phase}'=Failed guardedrun/failure --timeout=120s
+test "$(kubectl -n "$namespace" get guardedrun failure -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}')" = JobFailed
+failed_job=$(kubectl -n "$namespace" get guardedrun failure -o jsonpath='{.status.jobName}')
+kubectl -n "$namespace" wait --for=condition=Failed "job/$failed_job" --timeout=30s
 printf 'E2E passed: stale evidence, re-evaluation, real execution, restart, evaluation-only and failure.\n'
