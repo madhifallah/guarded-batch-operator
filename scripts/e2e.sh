@@ -17,15 +17,22 @@ cleanup() {
 }
 trap cleanup EXIT
 kind create cluster --name "$cluster" --kubeconfig "$KUBECONFIG" --wait 180s
-# The test image uses the same static binary produced by make build.
-mkdir "$workdir/image"
-cp bin/manager "$workdir/image/manager"
-printf 'FROM scratch\nCOPY manager /manager\nUSER 65532:65532\nENTRYPOINT ["/manager"]\n' > "$workdir/image/Dockerfile"
-docker build -t guarded-batch-operator:e2e "$workdir/image"
-kind load docker-image guarded-batch-operator:e2e --name "$cluster"
-cp -R config "$workdir/config"
-(cd "$workdir/config/manager" && kustomize edit set image controller=guarded-batch-operator:e2e)
-kustomize build "$workdir/config/default" | kubectl apply -f -
+image=${E2E_IMAGE:-guarded-batch-operator:e2e}
+if [[ -z "${E2E_IMAGE:-}" ]]; then
+  # The ordinary source test uses the static binary produced by make build.
+  mkdir "$workdir/image"
+  cp bin/manager "$workdir/image/manager"
+  printf 'FROM scratch\nCOPY manager /manager\nUSER 65532:65532\nENTRYPOINT ["/manager"]\n' > "$workdir/image/Dockerfile"
+  docker build -t "$image" "$workdir/image"
+fi
+kind load docker-image "$image" --name "$cluster"
+if [[ -n "${E2E_MANIFEST:-}" ]]; then
+  kubectl apply -f "$E2E_MANIFEST"
+else
+  cp -R config "$workdir/config"
+  (cd "$workdir/config/manager" && kustomize edit set image "controller=$image")
+  kustomize build "$workdir/config/default" | kubectl apply -f -
+fi
 kubectl wait --for=condition=Established crd/guardedruns.operations.example.org --timeout=60s
 kubectl -n "$namespace" rollout status deployment/guarded-batch-operator-controller-manager --timeout=180s
 kubectl -n "$namespace" create configmap maintenance-template --from-file=job.json=config/samples/job.json

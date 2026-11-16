@@ -11,7 +11,7 @@ OPA := $(BIN)/opa
 IMG ?= guarded-batch-operator:dev
 ENVTEST_K8S_VERSION ?= 1.37.x
 
-.PHONY: kustomize build generate manifests fmt vet test test-integration test-e2e verify security policy-test image install deploy
+.PHONY: kustomize build generate manifests fmt vet test test-integration test-e2e package-release test-release verify security policy-test image install deploy
 build:
 	mkdir -p $(BIN)
 	CGO_ENABLED=0 go build -trimpath -o $(BIN)/manager ./cmd
@@ -39,6 +39,14 @@ test-integration: manifests generate $(ENVTEST)
 
 test-e2e: build manifests $(KIND) $(KUSTOMIZE) $(KUBECTL)
 	PATH="$(BIN):$$PATH" scripts/e2e.sh
+
+package-release: build manifests $(KUSTOMIZE)
+	python3 scripts/package-release.py
+
+test-release: package-release $(KIND) $(KUBECTL)
+	cd dist/release && sha256sum --check SHA256SUMS
+	docker load --input dist/release/guarded-batch-operator_$$(cat VERSION)_image_linux_amd64.tar.gz
+	E2E_IMAGE="ghcr.io/madhifallah/guarded-batch-operator:$$(cat VERSION)" E2E_MANIFEST="$(CURDIR)/dist/release/install.yaml" PATH="$(BIN):$$PATH" scripts/e2e.sh
 
 verify: fmt vet test policy-test manifests generate
 	git diff --exit-code -- api config/crd config/rbac/role.yaml
