@@ -6,6 +6,10 @@ A Kubernetes operator written in Go that checks operational prerequisites before
 
 Use it for maintenance, archive cleanup, exports, or imports that require a recent backup or an open maintenance window. The included demo uses synthetic evidence and an echo workload.
 
+[![Architecture: a Go controller evaluates trusted ConfigMaps with OPA before creating bounded Kubernetes Jobs; blocked and evaluation-only runs create no Job.](docs/diagrams/architecture.svg)](docs/diagrams/architecture.svg)
+
+The diagram's [editable HTML source](docs/diagrams/architecture.html) and the [design notes](docs/design.md) describe the control flow and trust boundary.
+
 ## How it works
 
 1. An administrator maintains three ConfigMaps: a Job template, a Rego policy, and evidence supplied by a trusted producer.
@@ -57,6 +61,10 @@ See [the sample Job](config/samples/job.json), [backup freshness policy](policie
 GitHub Actions runs on an ephemeral GCP Spot pool. Two lanes cover Go race tests, Rego tests, API integration with envtest, vulnerability analysis, generated manifests, and real Job execution with Kind. Actions and development tools are pinned. A successful quality lane uploads the Linux binary, installation manifest, and coverage report.
 
 The self-hosted pool runs owner-authored pushes and internal PRs only. Fork PRs and other actors do not receive these runners. Contributors can run the same checks locally. CI cancellation on a newer push is disabled.
+
+## Distribution status
+
+The source is public. There is currently no versioned GitHub Release or published container image. Successful [CI runs](https://github.com/madhifallah/guarded-batch-operator/actions/workflows/ci.yml) provide a temporary `guarded-batch-<commit>` artifact containing `manager-linux-amd64`, `install.yaml`, and `coverage.out`, retained for seven days. These are development artifacts. Build the container locally with the command above.
 
 ## Scope
 
