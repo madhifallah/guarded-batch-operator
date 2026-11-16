@@ -9,4 +9,13 @@ Local qualification on 16 November 2026 used Go 1.27.4, controller-runtime 0.25.
 
 Two earlier local end-to-end attempts caught a test-image build context that excluded the binary and a missing startup flag. Both were corrected before the successful run. These results describe local qualification, not production adoption or completed remote CI.
 
-The GitHub workflow is prepared for the dedicated self-hosted GCP Spot pool. Initial remote qualification requires the repository to be selected in the runner App installation. The workflow badge is the source of current remote status.
+Both remote quality and Kubernetes end-to-end jobs passed on ephemeral GCP Spot
+workers in [the initial CI campaign](https://github.com/madhifallah/guarded-batch-operator/actions/runs/43875612839)
+at source `0ccd020`. The official artifact's digest and clean binary source
+revision were verified. The workflow badge reports the current remote status.
+
+The pool admits owner-authored repository runs and checks repository identity,
+run ID and attempt before workflow code executes. Scheduling labels are routing
+information; they do not establish permission to execute code. Workers retain
+repository affinity, including their caches. Runner provisioning and its
+qualification remain outside this generic public project.
