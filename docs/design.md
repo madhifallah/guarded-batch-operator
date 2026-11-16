@@ -18,4 +18,4 @@ Controller-runtime exposes its standard metrics on loopback port 8080; the addre
 
 Tests have distinct scopes: Go fakes exercise state transitions and failures, envtest validates the actual API/schema and controller watches, and Kind executes Pods and Jobs. envtest does not run a kubelet or Job controller.
 
-Future milestones can add a native CronJob run submitter, trusted evidence adapters, explicit application progress, and versioned image releases. None are prerequisites for the first controller lifecycle.
+Future milestones can add a native CronJob run submitter, trusted evidence adapters, and explicit application progress. Versioned binary/image packaging and qualification are described in [the release procedure](releasing.md).

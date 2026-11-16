@@ -30,3 +30,4 @@ go.work
 *.kubeconfig
 
 /dist/
+__pycache__/

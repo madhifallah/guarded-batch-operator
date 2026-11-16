@@ -62,9 +62,22 @@ GitHub Actions runs on an ephemeral GCP Spot pool. Two lanes cover Go race tests
 
 The self-hosted pool runs owner-authored pushes and internal PRs only. Fork PRs and other actors do not receive these runners. Contributors can run the same checks locally. CI cancellation on a newer push is disabled.
 
-## Distribution status
+## Releases
 
-The source is public. There is currently no versioned GitHub Release or published container image. Successful [CI runs](https://github.com/madhifallah/guarded-batch-operator/actions/workflows/ci.yml) provide a temporary `guarded-batch-<commit>` artifact containing `manager-linux-amd64`, `install.yaml`, and `coverage.out`, retained for seven days. These are development artifacts. Build the container locally with the command above.
+[Versioned releases](https://github.com/madhifallah/guarded-batch-operator/releases) target **Linux AMD64** and include a controller binary archive, a loadable Docker image archive, `install.yaml`, release metadata, and `SHA256SUMS`. The registry image is `ghcr.io/madhifallah/guarded-batch-operator:0.1.0`. Published installation manifests pin the image by digest.
+
+Download and verify the first release before installing it into your chosen Kubernetes context:
+
+```sh
+curl -fsSLO https://github.com/madhifallah/guarded-batch-operator/releases/download/v0.1.0/install.yaml
+curl -fsSLO https://github.com/madhifallah/guarded-batch-operator/releases/download/v0.1.0/SHA256SUMS
+sha256sum --ignore-missing --check SHA256SUMS
+kubectl apply -f install.yaml
+```
+
+To inspect the image without a cluster, run `docker run --rm ghcr.io/madhifallah/guarded-batch-operator:0.1.0 --help`. The image runs as UID/GID 65532. For offline loading, download the image archive and use `docker load --input guarded-batch-operator_0.1.0_image_linux_amd64.tar.gz`.
+
+CI qualifies the packaged image and manifest in Kind before a version tag can produce a draft release. See [the release procedure](docs/releasing.md) and [v0.1.0 release notes](docs/releases/v0.1.0.md). Ordinary [CI artifacts](https://github.com/madhifallah/guarded-batch-operator/actions/workflows/ci.yml) remain available for seven days.
 
 ## Scope
 
