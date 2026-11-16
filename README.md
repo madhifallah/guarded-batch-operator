@@ -79,6 +79,8 @@ To inspect the image without a cluster, run `docker run --rm ghcr.io/madhifallah
 
 CI qualifies the packaged image and manifest in Kind before a version tag can produce a draft release. See [the release procedure](docs/releasing.md) and [v0.1.0 release notes](docs/releases/v0.1.0.md). Ordinary [CI artifacts](https://github.com/madhifallah/guarded-batch-operator/actions/workflows/ci.yml) remain available for seven days.
 
+The [post-release review](docs/review-2026-11-16.md) documents controller, policy, RBAC, and publication fixes in source. The published `v0.1.0` artifacts are immutable and do not include those subsequent fixes.
+
 ## Scope
 
 This is an initial implementation, not evidence of production adoption. Evidence is a trusted ConfigMap contract; production backup integrations are not included. It does not schedule work, enforce global concurrency or provider spending limits, detect application progress, or promise exactly-once external side effects. Workers must tolerate retries. Run creation delegates the authority to execute administrator-provided templates; restrict template, policy, and evidence writes accordingly.

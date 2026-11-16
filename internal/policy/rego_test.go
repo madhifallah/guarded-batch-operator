@@ -78,3 +78,17 @@ func TestConcurrentEvaluationAndCancellation(t *testing.T) {
 		t.Fatalf("cancelled evaluation: %v %v", allowed, err)
 	}
 }
+
+func TestBuiltinErrorsCannotAuthorizeThroughNegation(t *testing.T) {
+	source := `package guarded
+default allow := false
+allow if { not deny }
+deny if { time.parse_rfc3339_ns(input.completedAt) < 1 }
+`
+	for _, value := range []any{"broken", true} {
+		allowed, err := (&Engine{}).Allow(t.Context(), source, map[string]any{"completedAt": value})
+		if err == nil || allowed {
+			t.Fatalf("builtin error authorized through negation: input=%v allowed=%v err=%v", value, allowed, err)
+		}
+	}
+}

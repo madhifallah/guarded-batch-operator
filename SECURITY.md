@@ -6,6 +6,8 @@ The operator executes administrator-maintained Job templates and trusts the conf
 
 The sample policy uses synthetic backup evidence; it does not validate a real backup or restore. OPA decisions are checked before Job creation and do not revoke already-running Jobs. Job retries can repeat external side effects.
 
+The controller's effective Roles permit ConfigMap reads and Lease-based leader election, with no ConfigMap writes or Secret reads. Kind checks these permissions using the deployed service account. Runtime builtin errors block policy evaluation, including when the failed expression appears in a negated rule. Policies must explicitly validate required evidence fields: a missing field can remain undefined without invoking a builtin. See the [16 November review](docs/review-2026-11-16.md) for fixes following the initial release and their validation scope.
+
 CI runs only owner-authored code from this repository on ephemeral GCP Spot workers. Never add fork execution or `pull_request_target` checkout to these workflows.
 
 The worker checks the authorized repository and run before executing workflow

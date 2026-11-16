@@ -2,7 +2,6 @@
 """Package the compiled controller and a non-root image for isolated qualification."""
 
 import gzip
-import hashlib
 import json
 from pathlib import Path
 import re
@@ -10,6 +9,8 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+
+from release_artifacts import checksums, image_config_digest
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "dist/release"
@@ -19,20 +20,14 @@ def command(*args, **kwargs):
     return subprocess.run(args, cwd=ROOT, check=True, **kwargs)
 
 
-def checksums(directory):
-    files = sorted(p for p in directory.iterdir() if p.name != "SHA256SUMS")
-    (directory / "SHA256SUMS").write_text("".join(
-        f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n" for p in files
-    ))
-
-
 def main():
     version = (ROOT / "VERSION").read_text().strip()
     if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version):
         raise ValueError("VERSION must be a stable semantic version without a v prefix")
     revision = command("git", "rev-parse", "HEAD", capture_output=True, text=True).stdout.strip()
     binary = ROOT / "bin/manager"
-    header = binary.read_bytes()[:20]
+    with binary.open("rb") as content:
+        header = content.read(20)
     if header[:6] != b"\x7fELF\x02\x01" or header[18:20] != b"\x3e\x00":
         raise ValueError("Release binary must be Linux AMD64 ELF")
     if OUT.exists():
@@ -73,6 +68,7 @@ def main():
                             archive.addfile(item, content)
         saved = context / "image.tar"
         command("docker", "image", "save", "--output", str(saved), image)
+        image_id = image_config_digest(saved, image)
         with saved.open("rb") as source, (OUT / image_archive).open("wb") as raw:
             with gzip.GzipFile(fileobj=raw, mode="wb", filename="", mtime=0) as compressed:
                 shutil.copyfileobj(source, compressed)
@@ -84,7 +80,7 @@ def main():
     (OUT / "release.json").write_text(json.dumps({
         "version": version, "tag": f"v{version}", "revision": revision,
         "repository": repository, "platform": "linux/amd64", "image": image,
-        "image_id": info["Id"], "binary_archive": binary_archive, "image_archive": image_archive,
+        "image_id": image_id, "binary_archive": binary_archive, "image_archive": image_archive,
     }, indent=2) + "\n")
     checksums(OUT)
     print(f"Release candidate packaged in {OUT}")

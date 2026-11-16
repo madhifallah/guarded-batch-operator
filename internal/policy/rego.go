@@ -25,7 +25,7 @@ func (e *Engine) Allow(ctx context.Context, source string, input map[string]any)
 	}
 	e.mu.Lock()
 	if source != e.source {
-		query, err := rego.New(rego.Query("data.guarded.allow"), rego.Module("policy.rego", source),
+		query, err := rego.New(rego.Query("data.guarded.allow"), rego.Module("policy.rego", source), rego.StrictBuiltinErrors(true),
 			rego.UnsafeBuiltins(map[string]struct{}{"http.send": {}, "net.lookup_ip_addr": {}, "opa.runtime": {}})).PrepareForEval(ctx)
 		if err != nil {
 			e.mu.Unlock()

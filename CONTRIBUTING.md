@@ -9,6 +9,6 @@ make verify test-integration security
 make test-e2e
 ```
 
-`make generate manifests` updates the API helpers, CRD, and runtime Role. Commit those generated files with API changes. Go tests use the standard `testing` package; Rego tests live beside their policies.
+`make generate manifests` updates the API helpers, CRD, and runtime Role. Commit those generated files with API changes. Go tests use the standard `testing` package; Rego tests live beside their policies. `make verify` also runs standard-library Python tests for archive identity and publication refusal paths. Run `make test-release` when changing packaging or publication; it tests the actual packaged image and installation manifest in Kind.
 
 Public fork PRs do not execute on the privileged self-hosted runner pool. Maintainers review contributions and reproduce tests before moving approved code to an owned branch. No external Kubernetes cluster or cloud credentials are needed for local tests.

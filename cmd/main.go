@@ -50,7 +50,7 @@ func main() {
 		log.Error(err, "create manager")
 		os.Exit(1)
 	}
-	reconciler := &controller.GuardedRunReconciler{Client: manager.GetClient(), Scheme: scheme,
+	reconciler := &controller.GuardedRunReconciler{Client: manager.GetClient(), APIReader: manager.GetAPIReader(), Scheme: scheme,
 		Policy: &policy.Engine{}, Recorder: manager.GetEventRecorderFor("guarded-batch-operator")}
 	if err := reconciler.SetupWithManager(manager); err != nil {
 		log.Error(err, "register controller")

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"reflect"
 	"strings"
 	"time"
@@ -31,10 +32,12 @@ type PolicyEvaluator interface {
 // GuardedRunReconciler launches administrator-defined Jobs after checking evidence.
 type GuardedRunReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Policy   PolicyEvaluator
-	Recorder record.EventRecorder
-	Now      func() time.Time
+	// APIReader bypasses the informer cache for execution identity and status decisions.
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
+	Policy    PolicyEvaluator
+	Recorder  record.EventRecorder
+	Now       func() time.Time
 }
 
 // +kubebuilder:rbac:groups=operations.example.org,resources=guardedruns,verbs=get;list;watch,namespace=system
@@ -45,9 +48,17 @@ type GuardedRunReconciler struct {
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch,namespace=system
 
 func (r *GuardedRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
 	var run operations.GuardedRun
-	if err := r.Get(ctx, req.NamespacedName, &run); err != nil {
+	if err := reader.Get(ctx, req.NamespacedName, &run); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	original := run.DeepCopy()
+	report := func(phase, reason, message string, allowed bool) (ctrl.Result, error) {
+		return r.report(ctx, &run, original, phase, reason, message, allowed)
 	}
 	if !run.DeletionTimestamp.IsZero() || run.Status.Phase == "Succeeded" || run.Status.Phase == "Failed" {
 		return ctrl.Result{}, nil
@@ -57,13 +68,13 @@ func (r *GuardedRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 	name := "guardedrun-" + string(run.UID)
 	var job batchv1.Job
-	err := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: name}, &job)
+	err := reader.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: name}, &job)
 	if err == nil {
-		if !metav1.IsControlledBy(&job, &run) {
-			return r.report(ctx, &run, "Blocked", "NameConflict", "A foreign Job occupies the execution name", false)
-		}
 		if run.Status.JobUID != "" && run.Status.JobUID != string(job.UID) {
-			return r.report(ctx, &run, "Failed", "JobReplaced", "The execution Job identity changed", false)
+			return report("Failed", "JobReplaced", "The execution Job identity changed", false)
+		}
+		if !metav1.IsControlledBy(&job, &run) {
+			return report("Blocked", "NameConflict", "A foreign Job occupies the execution name", false)
 		}
 		run.Status.JobName, run.Status.JobUID = job.Name, string(job.UID)
 		for _, c := range job.Status.Conditions {
@@ -71,44 +82,42 @@ func (r *GuardedRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				continue
 			}
 			if c.Type == batchv1.JobComplete {
-				return r.report(ctx, &run, "Succeeded", "JobComplete", "Execution completed", true)
+				return report("Succeeded", "JobComplete", "Execution completed", true)
 			}
 			if c.Type == batchv1.JobFailed {
-				return r.report(ctx, &run, "Failed", "JobFailed", "Execution failed; submit a new request to retry", false)
+				return report("Failed", "JobFailed", "Execution failed; submit a new request to retry", false)
 			}
 		}
-		return r.report(ctx, &run, "Running", "JobRunning", "Execution Job exists", true)
+		return report("Running", "JobRunning", "Execution Job exists", true)
 	}
 	if !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, err
 	}
 	if run.Status.JobName != "" {
-		return r.report(ctx, &run, "Failed", "JobMissing", "The observed execution Job disappeared; it will not be recreated", false)
+		return report("Failed", "JobMissing", "The observed execution Job disappeared; it will not be recreated", false)
 	}
 	if run.Spec.Mode != "" && run.Spec.Mode != "EvaluateOnly" && run.Spec.Mode != "Execute" {
-		return r.report(ctx, &run, "Blocked", "InvalidMode", "Unknown execution mode", false)
+		return report("Blocked", "InvalidMode", "Unknown execution mode", false)
 	}
 	configs := make([]corev1.ConfigMap, 3)
 	for i, ref := range []string{run.Spec.TemplateRef, run.Spec.PolicyRef, run.Spec.EvidenceRef} {
 		if err := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: ref}, &configs[i]); err != nil {
 			if apierrors.IsNotFound(err) {
-				return r.report(ctx, &run, "Blocked", "ConfigurationMissing", "A referenced ConfigMap is unavailable", false)
+				return report("Blocked", "ConfigurationMissing", "A referenced ConfigMap is unavailable", false)
 			}
 			return ctrl.Result{}, err
 		}
 	}
 	var spec batchv1.JobSpec
-	decoder := json.NewDecoder(strings.NewReader(configs[0].Data["job.json"]))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&spec); err != nil {
-		return r.report(ctx, &run, "Blocked", "InvalidTemplate", "job.json must contain a valid JobSpec", false)
+	if err := decodeJSON(configs[0].Data["job.json"], &spec); err != nil {
+		return report("Blocked", "InvalidTemplate", "job.json must contain a single valid JobSpec", false)
 	}
 	if err := validateTemplate(spec); err != nil {
-		return r.report(ctx, &run, "Blocked", "InvalidTemplate", err.Error(), false)
+		return report("Blocked", "InvalidTemplate", err.Error(), false)
 	}
 	var facts map[string]any
-	if err := json.Unmarshal([]byte(configs[2].Data["evidence.json"]), &facts); err != nil || facts == nil {
-		return r.report(ctx, &run, "Blocked", "InvalidEvidence", "evidence.json must contain an object", false)
+	if err := decodeJSON(configs[2].Data["evidence.json"], &facts); err != nil || facts == nil {
+		return report("Blocked", "InvalidEvidence", "evidence.json must contain a single object", false)
 	}
 	now := time.Now()
 	if r.Now != nil {
@@ -118,13 +127,13 @@ func (r *GuardedRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	defer cancel()
 	allowed, err := r.Policy.Allow(evalCtx, configs[1].Data["policy.rego"], map[string]any{"facts": facts, "now_unix": now.Unix(), "job": spec})
 	if err != nil {
-		return r.report(ctx, &run, "Blocked", "PolicyError", "Policy compilation or evaluation failed", false)
+		return report("Blocked", "PolicyError", "Policy compilation or evaluation failed", false)
 	}
 	if !allowed {
-		return r.report(ctx, &run, "Blocked", "PolicyDenied", "Operational prerequisites are not satisfied", false)
+		return report("Blocked", "PolicyDenied", "Operational prerequisites are not satisfied", false)
 	}
 	if run.Spec.Mode != "Execute" {
-		return r.report(ctx, &run, "Permitted", "EvaluationOnly", "Policy permits execution; evaluation mode creates no Job", true)
+		return report("Permitted", "EvaluationOnly", "Policy permits execution; evaluation mode creates no Job", true)
 	}
 	job = batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: run.Namespace}, Spec: spec}
 	if err := ctrl.SetControllerReference(&run, &job, r.Scheme); err != nil {
@@ -137,10 +146,30 @@ func (r *GuardedRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 	run.Status.JobName, run.Status.JobUID = job.Name, string(job.UID)
-	return r.report(ctx, &run, "Running", "JobCreated", "Execution Job created", true)
+	return report("Running", "JobCreated", "Execution Job created", true)
+}
+
+// decodeJSON preserves evidence integers and rejects trailing objects or garbage.
+func decodeJSON(source string, target any) error {
+	decoder := json.NewDecoder(strings.NewReader(source))
+	decoder.UseNumber()
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return fmt.Errorf("expected end of JSON input")
+	}
+	return nil
 }
 
 func validateTemplate(spec batchv1.JobSpec) error {
+	if spec.Suspend != nil && *spec.Suspend {
+		return fmt.Errorf("suspended Jobs cannot enforce an execution deadline")
+	}
+	if spec.ManagedBy != nil && *spec.ManagedBy != batchv1.JobControllerName {
+		return fmt.Errorf("Jobs must use the built-in Kubernetes Job controller")
+	}
 	if spec.ActiveDeadlineSeconds == nil || *spec.ActiveDeadlineSeconds < 1 || *spec.ActiveDeadlineSeconds > 3600 {
 		return fmt.Errorf("activeDeadlineSeconds must be between 1 and 3600")
 	}
@@ -164,20 +193,15 @@ func validateTemplate(spec batchv1.JobSpec) error {
 	return nil
 }
 
-func (r *GuardedRunReconciler) report(ctx context.Context, run *operations.GuardedRun, phase, reason, message string, allowed bool) (ctrl.Result, error) {
-	previous := run.DeepCopy()
+func (r *GuardedRunReconciler) report(ctx context.Context, run, previous *operations.GuardedRun, phase, reason, message string, allowed bool) (ctrl.Result, error) {
 	run.Status.Phase, run.Status.ObservedGeneration = phase, run.Generation
 	status := metav1.ConditionFalse
 	if allowed {
 		status = metav1.ConditionTrue
 	}
 	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{Type: "Ready", Status: status, Reason: reason, Message: message, ObservedGeneration: run.Generation})
-	var persisted operations.GuardedRun
-	if err := r.Get(ctx, client.ObjectKeyFromObject(run), &persisted); err != nil {
-		return ctrl.Result{}, err
-	}
-	if !reflect.DeepEqual(persisted.Status, run.Status) {
-		if err := r.Status().Patch(ctx, run, client.MergeFromWithOptions(&persisted, client.MergeFromWithOptimisticLock{})); err != nil {
+	if !reflect.DeepEqual(previous.Status, run.Status) {
+		if err := r.Status().Patch(ctx, run, client.MergeFromWithOptions(previous, client.MergeFromWithOptimisticLock{})); err != nil {
 			return ctrl.Result{}, err
 		}
 		if r.Recorder != nil && (previous.Status.Phase != phase || len(previous.Status.Conditions) == 0 || previous.Status.Conditions[0].Reason != reason) {
